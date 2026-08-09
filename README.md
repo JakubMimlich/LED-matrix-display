@@ -4,8 +4,16 @@ Jednoduchý modul displeja multiplexovaný na shift registroch 74HC595, použite
 
 # Pripojenie
 
-+V  ->  5V 
-SR  ->  D5
-R   ->  D6
-DT  ->  D7
-GND ->  G
++V -> 5V 
+
+SR -> D5
+
+R -> D6
+
+DT -> D7
+
+GND -> G
+
+# Programovanie ESP8266 - Arduino IDE
+
+https://www.laskakit.cz/arduino-navody/zaciname-s-wemos-d1-mini-s-wifi-modulem-esp8266/
