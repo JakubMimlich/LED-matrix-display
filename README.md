@@ -2,7 +2,9 @@
 
 Jednoduchý modul displeja multiplexovaný na shift registroch 74HC595, použiteľného pre rôzne platformy s toleranicou 3,3V / 5V riadiacej logiky.
 
-# Pripojenie
+
+# Ukážkový test s Wemos D1 mini / ESP8266 - Arduino IDE
+0.) Pripojenie
 
 +V -> 5V 
 
@@ -14,7 +16,6 @@ DT -> D7
 
 GND -> G
 
-# Programovanie ESP8266 - Arduino IDE
 
 1.) Inštalácia a nastavenie prostredia Arduino IDE
 
