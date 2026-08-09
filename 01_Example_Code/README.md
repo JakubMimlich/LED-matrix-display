@@ -1,0 +1,314 @@
+# 8×64 LED Matrix Web Control
+
+This project provides:
+
+- Browser-controlled static and running text
+- Persistent 64×8 pixel Paint mode with pointer and keyboard controls
+- A non-blocking stacked-message queue
+- ESP-NOW text reception
+- Space Runner game
+- Chrome-style single-pixel T-Rex Runner game
+- One-pixel Gravity Guy game with lethal walls, stairs, platforms, and ceiling/floor gravity flips
+- Native 64×8 Tetris game with one-LED square cells and original tetromino proportions
+- Pixel Racing game with automatic acceleration
+- Two-team 0–99 scoreboard
+- `HH:MM:SS` clock plus `DD.MM.YY` calendar display
+- Browser/manual time setup and automatic NTP synchronization every 12 hours while STA is connected
+- Non-blocking countdown timer with selectable `HH:MM:SS` or progress-bar presentation and blinking timeout indication
+- Non-blocking stopwatch
+- Simultaneous STA+AP Wi-Fi configuration
+- Built-in Dolphins pixel animation with a dedicated Animation page
+- Persistent 0°/180° screen rotation setting
+- EEPROM persistence for the last selected display mode, text, speed, timer duration/presentation, screen rotation, and 512-pixel paint bitmap
+
+## Files
+
+- `LED_matrix_display_8x64_gravity_tetris.ino` — receiver firmware, display driver, text functions, message stack, game, clock, Wi-Fi, ESP-NOW, and HTTP API.
+- `web_ui.h` — separate responsive HTML/CSS/JavaScript interface stored in flash.
+- `esp_now_sender_example/esp_now_sender_example.ino` — separate ESP8266/ESP32 serial-controlled ESP-NOW test sender sketch.
+Keep `LED_matrix_display_8x64_gravity_tetris.ino` and `web_ui.h` in the same Arduino sketch folder. The sender example is a separate sketch.
+
+## Supported boards and display pins
+
+| Platform | Data | Clock | Latch |
+|---|---:|---:|---:|
+| ESP8266 | D7 | D5 | D6 |
+| ESP32 | GPIO 23 | GPIO 18 | GPIO 19 |
+
+Only libraries supplied by the ESP8266 or ESP32 Arduino core are used.
+
+## First connection
+
+1. Upload the receiver sketch.
+2. Join `LED-Matrix-XXXXXX` using password `ledmatrix`.
+3. Open `http://192.168.4.1/`.
+4. Configure the home Wi-Fi connection if required.
+5. The setup AP remains active while STA mode connects to the router.
+
+## IP display when no client is connected
+
+When no AP or active STA web client is present, the matrix scrolls the reachable address for up to 20 seconds:
+
+- If STA is connected, it shows `STA IP x.x.x.x`.
+- Otherwise, it shows `AP IP 192.168.4.1`.
+
+An AP client is detected directly by the Wi-Fi driver. A STA-side browser is considered connected while it continues polling the web interface. When a client appears, the IP overlay stops immediately and the previous text, time, timer, stopwatch, or game mode resumes. If no client connects, the overlay automatically stops after 20 seconds. The address is shown for a fresh 20-second window after the last client disappears or when the reachable IP address changes.
+
+## Web UI pages
+
+The interface is organized as a small single-page control panel with these pages:
+
+- **Display** — current matrix content, mode, message-stack depth, clock, and network summary.
+- **Text** — static/running text and temporary stacked messages.
+- **Paint** — direct 64×8 pixel drawing, cursor movement, draw/erase tools, clear, fill, and inversion.
+- **Time** — clock, calendar, manual/browser time, NTP server, countdown timer, and stopwatch.
+- **Games** — Space Runner, T-Rex Runner, Gravity Guy, Pixel Racing, Tetris, and Scoreboard controls.
+- **Animation** — built-in Dolphins animation playback and frame speed.
+- **Settings** — STA+AP configuration, 0°/180° screen rotation, network state, and ESP-NOW diagnostics.
+
+## UI refresh behavior
+
+The status endpoint is still polled once per second, but editable controls are protected by a dirty-field and focus system:
+
+- Typing in text, Wi-Fi, time, mode, or speed fields marks that field as edited.
+- Polling continues to update read-only status information.
+- Edited fields are not overwritten, even after they lose focus.
+- The currently focused field is never synchronized from polling.
+- A field is marked clean only after its related command is successfully saved or sent.
+
+This prevents the custom-text box from refreshing while the user is typing.
+
+## Text display functions
+
+The receiver exposes reusable functions in the main sketch:
+
+```cpp
+showTextStatic("HELLO");
+showTextRunning("RUNNING MESSAGE", 60);
+showText("MESSAGE", TEXT_PRESENTATION_RUNNING, 60);
+
+stackTextStatic("ALERT", 3000);       // hold for 3000 ms
+stackTextRunning("NEXT ITEM", 60, 1); // speed 60 ms, one full pass
+```
+
+Immediate `showText...()` calls cancel the current temporary stack and become the persistent display mode.
+
+## Non-blocking display stack
+
+`updateDisplayStack()` is called from `loop()` and never uses a blocking `while` or `delay` loop. This keeps matrix scanning, HTTP, DNS, Wi-Fi, ESP-NOW, the clock, and the game responsive.
+
+Stack behavior:
+
+- Up to six waiting messages plus one active message.
+- Static items advance after their configured hold time.
+- Running items advance after their configured number of complete display passes.
+- When the stack finishes, the prior text, game, or clock mode resumes.
+- The UI can add messages to the stack or clear it.
+- ESP-NOW packets can also add messages to the same stack.
+
+## ESP-NOW receiver
+
+ESP-NOW starts automatically after the STA+AP radio is initialized. The web UI shows:
+
+- Receiver STA MAC address
+- Current Wi-Fi channel
+- Initialization state
+- Received and dropped packet counts
+- Last sender MAC
+- Current display-stack depth
+
+The ESP-NOW sender must use the same channel as the receiver. When the receiver joins a home router, its channel follows the router, and the setup AP follows that same channel.
+
+The receiver accepts this packed packet:
+
+```cpp
+static const uint32_t ESPNOW_DISPLAY_MAGIC = 0x4C4D4553UL; // "LMES"
+static const uint8_t ESPNOW_DISPLAY_VERSION = 1;
+static const uint8_t ESPNOW_FLAG_STACK = 0x01;
+
+struct __attribute__((packed)) EspNowDisplayPacket
+{
+  uint32_t magic;
+  uint8_t version;
+  uint8_t command;
+  uint8_t flags;
+  uint8_t repeatCount;
+  uint16_t speedMs;
+  uint16_t durationMs;
+  char text[96];
+};
+```
+
+Commands:
+
+| Value | Command |
+|---:|---|
+| 1 | Show static text |
+| 2 | Show running text |
+| 3 | Switch to Time mode |
+| 4 | Clear the temporary display stack |
+
+Set flag bit `0x01` to stack commands 1 or 2 instead of displaying immediately.
+
+Defaults when a packet field is zero:
+
+- Running speed: 60 ms
+- Static duration: 3000 ms
+- Running passes: 1
+
+ESP-NOW traffic is unencrypted in this example. Any compatible sender on the same channel can send accepted packets. Add peer encryption or sender-MAC filtering before using it for sensitive or public installations.
+
+## ESP-NOW sender test
+
+Open `esp_now_sender_example/esp_now_sender_example.ino` as a separate Arduino sketch.
+
+1. Set `ESPNOW_CHANNEL` to the channel shown in the receiver UI.
+2. Upload it to another ESP8266 or ESP32.
+3. Open Serial Monitor at 115200 baud.
+4. Send one of these commands:
+
+```text
+S HELLO       immediate static text
+Q ALERT       stacked static text
+R RUNNING     immediate running text
+T NEXT INFO   stacked running text
+TIME          show the clock
+CLEAR         clear the temporary stack
+```
+
+## Games
+
+### Space Runner
+
+- Start, pause, reset, and move the ship from the Games page.
+- Use Up/Down arrows or W/S after selecting the Space Runner card.
+- Asteroids move right-to-left.
+- The score increases when obstacles leave the display.
+- The UI speed value is the **starting step interval**. During play, the interval decreases by 3 ms per scored obstacle, down to a 35 ms minimum.
+
+### T-Rex Runner
+
+- Chrome-style side-scrolling runner for the 64×8 matrix.
+- The player is rendered as one LED near the left edge.
+- Enemies are one-pixel-wide vertical columns with randomized heights from one to five LEDs.
+- The complete bottom row is always illuminated as a continuous ground line.
+- Use the Jump button, Up arrow, W, or Space after selecting the T-Rex card.
+- Use P to pause or resume from the keyboard.
+- The score increases for every obstacle that leaves the display.
+- The UI speed value is the **starting step interval**. During play, the interval decreases by 3 ms per scored obstacle, down to a 35 ms minimum.
+- The jump uses a non-blocking eight-step arc, so Wi-Fi, ESP-NOW, HTTP, clock, timer, stopwatch, and matrix refresh continue running.
+
+### Gravity Guy
+
+- The player is a single LED near the left side.
+- The top and bottom rows form continuous route surfaces.
+- Press **Flip** to reverse gravity. The player travels one row per game step until it reaches the opposite surface.
+- Moving objects can be walls, horizontal platforms, or stair profiles, and can approach from either the ceiling or floor.
+- **Every object is hazardous.** Touching any lit wall, stair, or platform pixel immediately causes game over; the player does not climb or ride terrain.
+- Use Space, F, W, Up, or Down after selecting the Gravity Guy card.
+- Use P to pause or resume.
+- The score increases whenever a route object leaves the display.
+- The UI speed value is the **starting step interval**. During play, the interval decreases by 2 ms per scored object, down to a 30 ms minimum.
+
+### Tetris
+
+- The complete physical matrix is used as a native **64×8 logical board**.
+- One logical Tetris cell equals one physical LED, so every block is square and the original I, O, T, S, Z, J, and L tetromino proportions are preserved.
+- Pieces enter from the right and fall toward the left because the display is much wider than it is tall.
+- Completed vertical columns are cleared and the blocks to their right shift left.
+- Use Up/Down or W/S to move the piece across the eight-row board.
+- Use R to rotate and Space or Left Arrow for a hard drop.
+- Use P to pause or resume.
+- The fall speed is adjustable from 120 to 1200 ms.
+- Score values are 100, 300, 500, and 800 for clearing one through four columns.
+
+Starting or resetting a game cancels temporary stacked messages. Each game keeps its own state while powered. Space Runner, T-Rex Runner, and Gravity Guy accelerate automatically; Tetris keeps the fixed fall interval selected by the user.
+
+
+## Paint mode
+
+The Paint page controls every physical LED as an individual pixel:
+
+- Click or drag directly on the 64×8 browser canvas.
+- Use arrow keys or the on-screen directional pad to move the cursor.
+- **Draw ON** lights pixels while the cursor moves.
+- **Draw OFF** erases pixels while the cursor moves.
+- **Move only** moves the cursor without changing pixels.
+- Space toggles the current pixel.
+- Keyboard shortcuts: D selects draw, E selects erase, M selects move-only, C clears, and I inverses all pixels.
+- Buttons are provided for Pixel ON, Pixel OFF, clear screen, fill screen, inverse pixels, and selecting Paint mode.
+
+The cursor blinks on the physical matrix while Paint mode is active. The 512-pixel bitmap is stored in EEPROM after a short idle delay, avoiding an EEPROM write for every pointer movement. Selecting Paint as the last mode restores both the mode and bitmap after restart.
+
+## Time, timer, and stopwatch modes
+
+The clock display shows centered `HH:MM:SS`. Calendar mode shows centered local date as `DD.MM.YY`. Both use the same controller clock and support:
+
+- Browser-time synchronization
+- Manual local date/time
+- NTP synchronization through home Wi-Fi
+- Automatic NTP synchronization request immediately after STA connects and every 12 hours afterward
+- Configurable NTP server
+- Fixed UTC offset stored in EEPROM
+
+An STA association does not guarantee internet access; when the NTP server is unreachable, the request simply fails and the existing clock value remains in use until a later retry.
+
+The countdown timer supports durations from one second through `99:59:59`, plus set, start, pause/resume, and reset controls. The stopwatch supports show, start, pause/resume, and reset controls. Both are tracked on the ESP with `millis()`, so they continue when the browser page is closed or another display mode temporarily takes over.
+
+Selecting clock, calendar, timer, or stopwatch mode cancels temporary stacked messages. Daylight-saving changes are not automatic when using a fixed UTC offset.
+
+## Screen orientation
+
+The Settings page can rotate the complete logical framebuffer by 180 degrees. Rotation is applied at the matrix driver boundary, so text, Paint, games, clock, calendar, and IP overlays all rotate consistently. The setting is saved in EEPROM and restored at startup. A 90-degree option is intentionally not offered because rotating a 64×8 framebuffer to 8×64 would require cropping or a different physical panel arrangement.
+
+## Persistent last display mode
+
+EEPROM configuration version 6 stores the last selected display mode. It also stores the active text, text speed, configured timer duration/presentation, 0°/180° screen rotation, and complete Paint bitmap. After a restart, the controller initializes the saved mode instead of always returning to running text. Game modes restart in their ready state, and timer/stopwatch runtime progress is not restored after power loss.
+
+Existing version 1, version 2, version 3, version 4, and version 5 settings are migrated automatically. New or empty text configurations default to `Hello world` (rendered as uppercase by the bundled font).
+
+## HTTP API
+
+- `GET /api/status` — display, stack, ESP-NOW, game, clock/calendar, rotation, NTP schedule, and network status.
+- `POST /api/text` — `text`, `mode`, `speed`, `queue`, `hold`, `repeats`.
+- `POST /api/queue` — `action=clear`.
+- `POST /api/game` — `game`, `action`, `speed`. For Space Runner, T-Rex Runner, and Gravity Guy, `speed` sets the starting interval; their live interval accelerates automatically while playing. Tetris keeps a fixed user-selected fall interval. Games are `space`, `trex`, `gravity`, and `tetris`. Gravity Guy actions: `start`, `pause`, `reset`, `flip`, `speed`. Tetris actions: `start`, `pause`, `reset`, `up`, `down`, `rotate`, `drop`, `speed`.
+- `POST /api/paint` — actions `show`, `bitmap`, `pixel`, `move`, `clear`, `fill`, and `invert`. A full bitmap is 128 hexadecimal characters representing 64 bytes.
+- `POST /api/time` — clock/calendar actions: `show`, `calendar_show`, `save`, `set`, `ntp`; timer actions: `timer_set`, `timer_start`, `timer_pause`, `timer_reset`, `timer_show`; stopwatch actions: `stopwatch_start`, `stopwatch_pause`, `stopwatch_reset`, `stopwatch_show`. Timer set/start requests also send `duration` in seconds.
+- `POST /api/device` — `rotation=0` or `rotation=180`.
+- `POST /api/wifi` — STA and AP configuration.
+
+## Text limitations
+
+The bundled font supports ASCII characters 32 through 90. Lowercase letters are converted to uppercase, and unsupported characters become `?`.
+
+## Compiler compatibility fix
+
+The `TextScroller` character buffer and matrix framebuffer are initialized at runtime rather than with in-class array initializers. This avoids the `array used as initializer` error reported by some older ESP8266/ESP32 Arduino GCC toolchains.
+
+## ESP8266 core 2.7.4 compatibility
+
+The hexadecimal paint-bitmap lookup table is named `HEX_DIGITS` rather than `HEX`. Older ESP8266 Arduino cores define `HEX` as a macro in `Print.h`, so using `HEX` as a variable name causes a compilation error.
+
+## Countdown timer display
+
+The countdown timer can be shown in two matrix presentations:
+
+- **Time** — centered `HH:MM:SS`.
+- **Progress bar** — a bordered 64-column bar that empties as the countdown approaches zero.
+
+When the timer reaches zero, the selected timer presentation blinks approximately every 450 ms until the timer is reset, started again, or another display mode is selected. The selected timer presentation is stored in EEPROM.
+
+## Pixel Racing
+
+Pixel Racing uses the 64×8 display as a horizontal road. A two-pixel car near the left side moves vertically with Up/Down controls while traffic moves toward it from the right. The configured speed is the starting step interval; the game accelerates by 3 ms for each obstacle passed, down to a 35 ms minimum.
+
+Keyboard controls: W/S or Up/Down to move, P to pause/resume.
+
+## Scoreboard
+
+The Games page includes a simple two-team scoreboard. Each side can be incremented or decremented from 0 to 99, scores can be swapped or reset, and the matrix renders the result as `00:00`. Selecting the scoreboard is remembered as the last display mode; scores themselves start from `00:00` after a reboot.
+
+## Dolphins animation
+
+The Animation page currently contains a built-in Dolphins animation. Two small pixel dolphins animate directly on the 64×8 matrix with adjustable frame timing from 80–1000 ms. Play, pause/resume, and restart controls are available. Selecting the animation is remembered as the last display mode.
